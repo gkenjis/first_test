@@ -124,11 +124,9 @@ class CollateFn:
     def __call__(self, batch):
         images = torch.stack([sample[0] for sample in batch])
         labels = [sample[1] for sample in batch]
-        targets = torch.cat(labels)
-        target_lengths = torch.tensor([label.numel() for label in labels], dtype=torch.long)
+        target_lengths = torch.tensor([len(label) for label in labels], dtype=torch.long)
         valid_ratios = torch.tensor([sample[2] for sample in batch], dtype=torch.float32)
-        return images, targets, target_lengths, valid_ratios
-
+        return images, labels, target_lengths, valid_ratios
 
 def build_dataloader(samples, shuffle=True, drop_last=True, num_workers=4):
     dataset = MyDataset(samples, normalize=True)
