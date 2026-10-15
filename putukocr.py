@@ -170,6 +170,7 @@ class OCRModel(nn.Module):
         self.proj=nn.Linear(int(512*IMG_H/16),d_model)
         self.pos_emb=PositionalEncoding(d_model=d_model)
         self.encoder=nn.Sequential(*[ConformerBlock(d_model,head,d_model*3) for _ in range(layers)])
+        self.encoder_norm = nn.LayerNorm(d_model)
         self.head=nn.Linear(d_model,num_classes)
 
     def forward(self,x):
@@ -179,7 +180,8 @@ class OCRModel(nn.Module):
         x=self.proj(x)
         x=self.pos_emb(x)
         x=self.encoder(x)
-        return F.log_softmax(self.head(x),-1)
+        x=self.encoder_norm(x)
+        return self.head(x)
 
 class SimpleCTCLoss(nn.Module):
     """
