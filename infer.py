@@ -11,15 +11,18 @@ No PaddlePaddle runtime is used. All model operations are torch.nn modules.
 from __future__ import annotations
 import json
 import math
-from pathlib import Path
 
 import numpy as np
-from sympy import im
 import torch
 from PIL import Image
-from ppocrv6_model import PPOCRV6Small
-from transformers import PPOCRV6SmallRecForTextRecognition
+from ppocrv6_model import PPOCRV6Small,config_small
 from paddle_line import PPOCRv6Detector
+
+from transformers import PPOCRV6SmallRecForTextRecognition
+
+with open("charset.json", "r", encoding="utf-8") as f:
+    chars = json.load(f)
+    CHARACTER_LIST = chars["character_list"]
 
 def load_model(model_id_or_path: str,local_files_only: bool = False,):
     """Load the official safetensors into the official pure-PyTorch graph."""
@@ -43,13 +46,11 @@ def convert_safetensors_to_pt(model_id_or_path: str,local_files_only: bool = Fal
     return
 
 
-def _preprocess_images(images: list[Image.Image], preprocessor_config: dict) -> torch.Tensor:
+def _preprocess_images(images: list[Image.Image]) -> torch.Tensor:
     """Resize, right-pad, and normalize RGB recognition images."""
-    size = preprocessor_config["size"]
-    pad_size = preprocessor_config.get("pad_size", size)
-    target_height = int(size["height"])
-    target_width = int(pad_size["width"])
-    max_width = int(preprocessor_config.get("max_image_width", target_width))
+    target_height = 48
+    target_width = 320
+    max_width = 3200
 
     resized_images = []
     for image in images:
@@ -68,9 +69,8 @@ def _preprocess_images(images: list[Image.Image], preprocessor_config: dict) -> 
     return pixel_values
 
 
-def _decode_ctc(probabilities: torch.Tensor, preprocessor_config: dict) -> list[dict[str, str | float]]:
+def _decode_ctc(probabilities: torch.Tensor) -> list[dict[str, str | float]]:
     """Greedy CTC decode of model probabilities using the configured character list."""
-    characters = preprocessor_config["character_list"]
     confidences, token_ids = probabilities.max(dim=-1)
     results = []
 
@@ -80,7 +80,7 @@ def _decode_ctc(probabilities: torch.Tensor, preprocessor_config: dict) -> list[
         previous_token = 0
         for token, confidence in zip(sequence.tolist(), sequence_confidences.tolist()):
             if token != 0 and token != previous_token:
-                decoded.append(characters[token])
+                decoded.append(CHARACTER_LIST[token])
                 selected_confidences.append(confidence)
             previous_token = token
         score = sum(selected_confidences) / len(selected_confidences) if selected_confidences else 0.0
@@ -90,52 +90,45 @@ def _decode_ctc(probabilities: torch.Tensor, preprocessor_config: dict) -> list[
 
 
 @torch.inference_mode()
-def recognize(line_image: Image.Image, model, preprocessor_config, device_obj):
-    pixel_values = _preprocess_images([line_image], preprocessor_config).to(device_obj)
+def recognize(line_image: Image.Image, model, device_obj):
+    pixel_values = _preprocess_images([line_image]).to(device_obj)
     pixel_values = pixel_values.to(dtype=next(model.parameters()).dtype)
 
-    outputs = model(pixel_values=pixel_values)
-    logits = outputs[0]
-    decoded = _decode_ctc(logits, preprocessor_config)
+    logits = model(pixel_values=pixel_values)
+    decoded = _decode_ctc(logits)
     return decoded, logits
 
 @torch.inference_mode()
-def recognize_batch(line_images: list[Image.Image],model,preprocessor_config,device: torch.device):
-    if not line_images:
-        return [], None
-
+def recognize_batch(line_images: list[Image.Image],model,device: torch.device):
     model_dtype = next(model.parameters()).dtype
-    pixel_values = _preprocess_images(line_images, preprocessor_config)
+    pixel_values = _preprocess_images(line_images)
     pixel_values = pixel_values.to(device=device, dtype=model_dtype)
 
-    outputs = model(pixel_values=pixel_values)
-    logits = outputs[0]
-
-    results = _decode_ctc(logits, preprocessor_config)
+    logits = model(pixel_values=pixel_values)
+    results = _decode_ctc(logits)
     return results, logits
 
 if __name__ == "__main__":
-    detector = PPOCRv6Detector("inference.onnx", score_thresh=0.30, min_area=30)
+
+    detector = PPOCRv6Detector("ppocrv6_det_small.onnx", score_thresh=0.30, min_area=30)
     image, boxes = detector.predict("test.png")
-    # convert_safetensors_to_pt(R"C:\projects\ppocr\model", local_files_only=True)
-    model = PPOCRV6Small.from_files(R"C:\projects\ppocr\model\config.json",R"ppocrv6_small.pt")
+
+    model = PPOCRV6Small(config_small, R"ppocrv6_small.pt")
     # model = load_model(R"C:\projects\ppocr\model", local_files_only=True)
     model.to(torch.device("cpu"))
     model.eval()
     
-    with open(R"C:\projects\ppocr\model\preprocessor_config.json", encoding="utf-8") as config_file:
-        preprocessor_config = json.load(config_file)
-
     line_images = [image.crop(box) for box in boxes]
     print(f"Total line images: {len(line_images)}")
-    # for i in range(0, len(line_images), 5):
-    #     batch = line_images[i:i+5]
-    #     results, logits = recognize_batch(batch,model,preprocessor_config,device=torch.device("cpu"))
-    #     for j,result in enumerate(results):
-    #         print(f"{i+1+j}:{result['text']}")
-
-    for i in range(len(line_images)):
-        img = line_images[i]
-        results, logits = recognize(img,model,preprocessor_config,device_obj=torch.device("cpu"))
+    for i in range(0, len(line_images), 10):
+        batch = line_images[i:i+10]
+        results, logits = recognize_batch(batch,model,device=torch.device("cpu"))
         for j,result in enumerate(results):
             print(f"{i+1+j}:{result['text']}")
+
+    # for i in range(len(line_images)):
+    #     img = line_images[i]
+    #     results, logits = recognize(img,model,preprocessor_config,device_obj=torch.device("cpu"))
+    #     for j,result in enumerate(results):
+    #         text = result['text']
+    #         print(f"{i+1+j}:{text}\t{len(text)}\t{logits.shape[1]}")
